@@ -1559,20 +1559,24 @@ class AISub {
     this.stuckTimer = 0;
     this.prevX = x; this.prevY = y;
     this.escapeBoost = 0;
+    // combat
+    this._dodgeTimer = 0;
+    this._dodgeDir = 1;
   }
 
-  _findTarget(px, py) {
-    let best = null, bestD = 800;
-    // Player
-    const dpdx = wrappedDistX(this.x, px), dpdy = this.y - py;
-    const dpd = Math.sqrt(dpdx*dpdx + dpdy*dpdy);
-    if (dpd < bestD) { bestD = dpd; best = { x:px, y:py, vx:0, vy:0, type:'player' }; }
-    // Other AI
-    for (const o of aiSubs) {
-      if (o === this || !o.alive) continue;
-      const ddx = wrappedDistX(this.x, o.x), ddy = this.y - o.y;
-      const d = Math.sqrt(ddx*ddx + ddy*ddy);
-      if (d < bestD) { bestD = d; best = { x:o.x, y:o.y, vx:Math.cos(o.heading)*o.speed, vy:Math.sin(o.heading)*o.speed, type:'ai', ref:o }; }
+  _findTarget() {
+    let best = null, bestD = Infinity;
+    // P1
+    if (sub.state === 'alive') {
+      const dpdx = wrappedDistX(this.x, sub.x), dpdy = this.y - sub.y;
+      const dpd = Math.sqrt(dpdx*dpdx + dpdy*dpdy);
+      if (dpd < bestD) { bestD = dpd; best = { x:sub.x, y:sub.y, vx:Math.cos(sub.heading)*sub.speed, vy:Math.sin(sub.heading)*sub.speed, type:'player', ref:sub, id:'P1' }; }
+    }
+    // P2
+    if (dualMode && sub2.state === 'alive') {
+      const d2dx = wrappedDistX(this.x, sub2.x), d2dy = this.y - sub2.y;
+      const d2d = Math.sqrt(d2dx*d2dx + d2dy*d2dy);
+      if (d2d < bestD) { bestD = d2d; best = { x:sub2.x, y:sub2.y, vx:Math.cos(sub2.heading)*sub2.speed, vy:Math.sin(sub2.heading)*sub2.speed, type:'player', ref:sub2, id:'P2' }; }
     }
     return best;
   }
@@ -1705,70 +1709,174 @@ class AISub {
     }
   }
 
-  update(dt, px, py) {
-    // Stealth timer
+  update(dt) {
+    // ── Timers ──
     if (this.isStealth) { this.stealthTimer -= dt; if (this.stealthTimer <= 0) this.isStealth = false; }
-    // Respawn / rebuild
     if (this.respawnTimer > 0) { this.respawnTimer -= dt; if (this.respawnTimer <= 0) { this.rebuildTimer = 1; this.alive = true; this.x = this.wreckX; this.y = this.wreckY; } return; }
     if (this.rebuildTimer > 0) { this.rebuildTimer -= dt; if (this.rebuildTimer <= 0) { this.hp = this.maxHp; this._respawnRandom(); } return; }
     if (!this.alive) { if (this.wreckTimer > 0) this.wreckTimer -= dt; return; }
-    // HP bar show timer
     if (this.showHP > 0) this.showHP -= dt;
     this.fireCD -= dt;
+    if (this._dodgeTimer > 0) this._dodgeTimer -= dt;
 
-    // ── State decision ──
-    const hpRatio = this.hp / this.maxHp;
-    const target = this._findTarget(px, py);
+    // ── Target perception ──
+    const target = this._findTarget();
     const nearSkill = this._findNearestSkill();
     this.hasTarget = !!target;
+    const hpRatio = this.hp / this.maxHp;
 
-    // P1: Survive
-    if (hpRatio < 0.4) {
+    // ── Stuck detection ──
+    const disp = Math.sqrt(
+      Math.pow(wrappedDistX(this.prevX, this.x), 2) +
+      Math.pow(this.y - this.prevY, 2)
+    );
+    this.prevX = this.x; this.prevY = this.y;
+    if (disp < 10 * dt) this.stuckTimer += dt;
+    else this.stuckTimer = Math.max(0, this.stuckTimer - dt * 3);
+    const isStuck = this.stuckTimer > 2;
+
+    // ── State machine ──
+    if (isStuck) {
+      // State C: Unstuck
+      this.state = 'unstuck';
+      // Reverse
+      this.speed -= 60 * dt;
+      this.speed = Math.max(-80, this.speed);
+      const rvx = Math.cos(this.heading) * this.speed * dt;
+      const rvy = Math.sin(this.heading) * this.speed * dt;
+      let nx = this.x + rvx, ny = this.y + rvy;
+      if (!checkLandCollision(nx, ny, this.colR)) { this.x = nx; this.y = ny; }
+      this.x = wrapX(this.x);
+      // Find best escape angle
+      let bestA = this.heading, bestOpen = 0;
+      for (let i = 0; i < 12; i++) {
+        const a = (i / 12) * Math.PI * 2;
+        let cnt = 0;
+        for (let j = 0; j < 7; j++) {
+          const da = (j - 3) * 0.25;
+          const tx = this.x + Math.cos(a + da) * 100;
+          const ty = this.y + Math.sin(a + da) * 100;
+          if (!isPointOnLand(tx, ty)) cnt++;
+        }
+        if (cnt > bestOpen) { bestOpen = cnt; bestA = a; }
+      }
+      this.targetHeading = bestA;
+      let dH = this.targetHeading - this.heading;
+      while (dH > Math.PI) dH -= Math.PI*2; while (dH < -Math.PI) dH += Math.PI*2;
+      this.heading += dH * 2.5 * dt;
+      this.speed += 120 * dt;
+      this.speed = Math.max(30, Math.min(180, this.speed));
+      // Emergency teleport after 5s stuck
+      if (this.stuckTimer > 5) {
+        const safe = findOpenWaterPos(120, 50);
+        for (let f = 0; f < 12; f++) {
+          const fa = (f / 12) * Math.PI * 2;
+          particles.push(new Particle(this.x + Math.cos(fa) * 20, this.y + Math.sin(fa) * 20, 0, 0, 0.4, '#ffffff', 4));
+        }
+        this.x = safe.x; this.y = safe.y;
+        this.stuckTimer = 0; this.prevX = this.x; this.prevY = this.y;
+      }
+      return;
+    }
+
+    // ── Low HP flee ──
+    if (hpRatio < 0.3 && target) {
       this.state = 'flee';
-      if (target) {
-        this._steerTo(target.x, target.y, -1.8, dt); // away from target
-        this._move(dt, 200, 200);
-      } else {
-        this._steerTo(px, py, -1.5, dt);
-        this._move(dt, 180, 150);
-      }
+      this._steerTo(target.x, target.y, -2.0, dt);
+      this._move(dt, 220, 200);
       this._autoUseActive(target);
+      return;
     }
-    // P2: Attack
-    else if (target) {
-      this.state = 'attack';
-      this.reactionTimer -= dt;
-      // Predict target position (0.5s ahead)
-      const predX = target.x + (target.vx||0) * 0.5;
-      const predY = target.y + (target.vy||0) * 0.5;
-      const ddx = wrappedDistX(this.x, predX), ddy = this.y - predY;
+
+    // ── Combat states with target ──
+    if (target) {
+      const ddx = wrappedDistX(this.x, target.x), ddy = this.y - target.y;
       const dist = Math.sqrt(ddx*ddx + ddy*ddy);
-      const aToT = Math.atan2(ddy, ddx);
+      // Predict player angular velocity for aiming strategy
+      const tRef = target.ref;
+      let angVel = 0;
+      if (tRef && tRef.angularVel !== undefined) angVel = Math.abs(tRef.angularVel);
+      const playerTurning = angVel > 0.8;
 
-      this._steerTo(predX, predY, 2.0, dt);
-
-      if (dist < 200) {
-        this._move(dt, 80, -100); // back off
-      } else if (dist < 400) {
-        this._move(dt, 120, 30);
+      if (dist > 250) {
+        // ── State A: Chase ──
+        this.state = 'chase';
+        // Predict target position (0.3s lead)
+        const lead = playerTurning ? 0 : 0.3;
+        const predX = target.x + (target.vx||0) * lead;
+        const predY = target.y + (target.vy||0) * lead;
+        const pdx = wrappedDistX(this.x, predX), pdy = this.y - predY;
+        const pDist = Math.sqrt(pdx*pdx + pdy*pdy);
+        const aToT = Math.atan2(pdy, pdx);
+        this._steerTo(predX, predY, 2.2, dt);
+        this._move(dt, 180, 140);
+        // Fire at long range if roughly aimed
+        if (pDist < 500 && this.fireCD <= 0 && Math.abs(aToT - this.heading) < 0.3) {
+          this._tryFire(target, aToT);
+          this._dodgeTimer = 0.5;
+          this._dodgeDir = Math.random() < 0.5 ? -1 : 1;
+        }
       } else {
-        this._move(dt, 160, 120); // chase
-      }
+        // ── State B: Engage (dist <= 250) ──
+        this.state = 'engage';
+        // Check line-of-sight (no land between)
+        let losBlocked = false;
+        for (let s = 0.1; s <= 1; s += 0.1) {
+          const sx = this.x + ddx * s;
+          const sy = this.y + ddy * s;
+          if (isPointOnLand(sx, sy)) { losBlocked = true; break; }
+        }
+        // Aim at player position (no prediction if turning; 0.3s lead if straight)
+        const lead = playerTurning ? 0 : 0.3;
+        const aimX = target.x + (target.vx||0) * lead;
+        const aimY = target.y + (target.vy||0) * lead;
+        const adx = wrappedDistX(this.x, aimX), ady = this.y - aimY;
+        const aToT = Math.atan2(ady, adx);
 
-      if (this.reactionTimer <= 0) {
-        this._tryFire(target, aToT);
-        this.reactionTimer = 0.3 + Math.random() * 0.5;
+        if (losBlocked) {
+          // Can't see target, reposition
+          this._steerTo(target.x, target.y, 2.0, dt);
+          this._move(dt, 140, 100);
+        } else {
+          // Steer toward aim point
+          this._steerTo(aimX, aimY, 2.5, dt);
+
+          if (dist < 120) {
+            // Too close, strafe
+            const strafeA = this.heading + (Math.PI / 2) * (this._dodgeDir || 1);
+            this.targetHeading = strafeA;
+            let dH = this.targetHeading - this.heading;
+            while (dH > Math.PI) dH -= Math.PI*2; while (dH < -Math.PI) dH += Math.PI*2;
+            this.heading += dH * 2.5 * dt;
+            this._move(dt, 100, 80);
+          } else {
+            this._move(dt, 90, 50);
+          }
+
+          // Fire when aimed (±15° ≈ 0.26 rad)
+          if (this.fireCD <= 0 && Math.abs(aToT - this.heading) < 0.26) {
+            this._tryFire(target, aToT);
+            this.fireCD = 2.5;
+            // Dodge after firing
+            this._dodgeTimer = 0.5;
+            this._dodgeDir = Math.random() < 0.5 ? -1 : 1;
+          }
+        }
+      }
+      // Dodge maneuver
+      if (this._dodgeTimer > 0) {
+        this.heading += this._dodgeDir * 2.5 * dt;
       }
       this._autoUseActive(target);
+      return;
     }
-    // P3: Collect (steer toward skill; pickup handled centrally)
-    else if (nearSkill && hpRatio >= 0.6) {
+
+    // ── No target: collect skill or patrol ──
+    if (nearSkill && hpRatio >= 0.5) {
       this.state = 'collect';
       this._steerTo(nearSkill.x, nearSkill.y, 1.6, dt);
-      this._move(dt, 130, 80);
-    }
-    // P4: Patrol
-    else {
+      this._move(dt, 140, 90);
+    } else {
       this.state = 'patrol';
       this.aiTimer = (this.aiTimer||0) - dt;
       if (!this.aiTimer || this.aiTimer <= 0) {
@@ -1777,65 +1885,9 @@ class AISub {
       }
       let dH = this.targetHeading - this.heading;
       while (dH > Math.PI) dH -= Math.PI*2; while (dH < -Math.PI) dH += Math.PI*2;
-      this.heading += dH * 0.8 * dt;
-      this._move(dt, 100, 30);
+      this.heading += dH * 0.9 * dt;
+      this._move(dt, 110, 40);
       this._autoUseActive(null);
-    }
-
-    // ── Stuck detection & escape ──
-    const disp = Math.sqrt(
-      Math.pow(wrappedDistX(this.prevX, this.x), 2) +
-      Math.pow(this.y - this.prevY, 2)
-    );
-    this.prevX = this.x; this.prevY = this.y;
-
-    if (this.escapeBoost > 0) {
-      this.escapeBoost -= dt;
-      this.speed += 80 * dt;
-      if (this.escapeBoost <= 0) this.stuckTimer = 0;
-    }
-
-    if (disp < 15 * dt) {
-      this.stuckTimer += dt;
-    } else {
-      this.stuckTimer = Math.max(0, this.stuckTimer - dt * 2);
-    }
-
-    if (this.stuckTimer > 3) {
-      if (!this._stuckPhase) this._stuckPhase = 1;
-
-      if (this._stuckPhase === 1) {
-        // Phase 1: force-turn toward open water + boost
-        let bestA = this.heading, bestOpen = 0;
-        for (let i = 0; i < 16; i++) {
-          const a = (i / 16) * Math.PI * 2;
-          let cnt = 0;
-          for (let j = 0; j < 5; j++) {
-            const da = (j - 2) * 0.3;
-            const tx = this.x + Math.cos(a + da) * 80;
-            const ty = this.y + Math.sin(a + da) * 80;
-            if (!isPointOnLand(tx, ty)) cnt++;
-          }
-          if (cnt > bestOpen) { bestOpen = cnt; bestA = a; }
-        }
-        this.targetHeading = bestA;
-        this.heading = bestA;
-        this.escapeBoost = 2;
-        this._stuckPhase = 2;
-      } else if (this._stuckPhase === 2 && this.stuckTimer > 5) {
-        // Phase 2: emergency teleport after 5s total stuck
-        const safe = findOpenWaterPos(120, 50);
-        // White flash particles
-        for (let f = 0; f < 12; f++) {
-          const fa = (f / 12) * Math.PI * 2;
-          particles.push(new Particle(this.x + Math.cos(fa) * 20, this.y + Math.sin(fa) * 20, 0, 0, 0.4, '#ffffff', 4));
-        }
-        this.x = safe.x; this.y = safe.y;
-        this.stuckTimer = 0; this.escapeBoost = 0; this._stuckPhase = 0;
-        this.prevX = this.x; this.prevY = this.y;
-      }
-    } else {
-      this._stuckPhase = 0;
     }
   }
 
@@ -1856,6 +1908,7 @@ class AISub {
     this.hp = this.maxHp;
     this.passiveSkill = null; this.activeSkill = null; this.isStealth = false;
     this.stuckTimer = 0; this.escapeBoost = 0;
+    this._dodgeTimer = 0; this._dodgeDir = 1;
   }
 
   draw(ctx) {
@@ -1982,63 +2035,59 @@ function applyPassiveEffect(missile, passiveSkill) {
 }
 
 // Stub: called on X key press
-function activateSkill() {
-  if (!player.activeSkill) return;
-  const skill = player.activeSkill;
+function activateSkill(pState, sInst) {
+  if (!pState.activeSkill) return;
+  const skill = pState.activeSkill;
   switch (skill.typeId) {
-    case 'STEALTH': activateStealth(); break;
-    case 'DECOY':   activateDecoy();   break;
-    case 'LASER':   spawnLaser();      break;
-    case 'MINE':    spawnMines();      break;
+    case 'STEALTH': activateStealth(pState, sInst); break;
+    case 'DECOY':   activateDecoy(sInst);           break;
+    case 'LASER':   spawnLaser(sInst);              break;
+    case 'MINE':    spawnMines(sInst);              break;
   }
-  player.activeSkill = null;
+  pState.activeSkill = null;
 }
 
-function activateStealth() {
-  player.isStealth = true;
-  player.stealthTimer = 8;
-  sub.stealthActive = true;
-  sub._origMaxSpeed = sub.maxSpeed;
-  sub._origAccel = sub.accel;
-  sub.maxSpeed = Math.round(sub._origMaxSpeed * 0.7);
-  sub.accel = Math.round(sub._origAccel * 0.6);
+function activateStealth(pState, sInst) {
+  pState.isStealth = true;
+  pState.stealthTimer = 8;
+  sInst.stealthActive = true;
+  sInst._origMaxSpeed = sInst.maxSpeed;
+  sInst._origAccel = sInst.accel;
+  sInst.maxSpeed = Math.round(sInst._origMaxSpeed * 0.7);
+  sInst.accel = Math.round(sInst._origAccel * 0.6);
 }
 
-function deactivateStealth() {
-  player.isStealth = false;
-  player.stealthTimer = 0;
-  sub.stealthActive = false;
-  sub.maxSpeed = sub._origMaxSpeed;
-  sub.accel = sub._origAccel;
+function deactivateStealth(pState, sInst) {
+  pState.isStealth = false;
+  pState.stealthTimer = 0;
+  sInst.stealthActive = false;
+  sInst.maxSpeed = sInst._origMaxSpeed;
+  sInst.accel = sInst._origAccel;
 }
 
-function activateDecoy() {
-  // Remove old decoys
+function activateDecoy(sInst) {
   decoys.length = 0;
-  // Spawn 2 new decoys at sub position
   for (let i = 0; i < 2; i++) {
-    const ox = sub.x + (Math.random() - 0.5) * 40;
-    const oy = sub.y + (Math.random() - 0.5) * 40;
-    const oh = sub.heading + (Math.random() - 0.5) * 0.7; // ±20°
-    decoys.push(new Decoy(ox, oy, oh, sub.speed));
+    const ox = sInst.x + (Math.random() - 0.5) * 40;
+    const oy = sInst.y + (Math.random() - 0.5) * 40;
+    const oh = sInst.heading + (Math.random() - 0.5) * 0.7;
+    decoys.push(new Decoy(ox, oy, oh, sInst.speed));
   }
 }
 
-function spawnLaser() {
-  const bowX = sub.x + Math.cos(sub.heading) * 32;
-  const bowY = sub.y + Math.sin(sub.heading) * 32;
-  // Remove old laser (max 1)
+function spawnLaser(sInst) {
+  const bowX = sInst.x + Math.cos(sInst.heading) * 32;
+  const bowY = sInst.y + Math.sin(sInst.heading) * 32;
   lasers.length = 0;
   lasers.push({
     x: bowX, y: bowY,
-    angle: sub.heading,
+    angle: sInst.heading,
     length: 1500,
     life: 0.4, maxLife: 0.4,
   });
-  // Red muzzle flash
   for (let i = 0; i < 12; i++) {
     const spread = (Math.random() - 0.5) * 1.0;
-    const a = sub.heading + spread;
+    const a = sInst.heading + spread;
     const spd = 80 + Math.random() * 160;
     particles.push(new Particle(bowX, bowY,
       Math.cos(a) * spd, Math.sin(a) * spd,
@@ -2048,14 +2097,14 @@ function spawnLaser() {
   }
 }
 
-function spawnMines() {
+function spawnMines(sInst) {
   const now = performance.now() / 1000;
   for (let i = 0; i < 3; i++) {
     const a = Math.random() * Math.PI * 2;
     const dist = 30 + Math.random() * 30;
     mines.push({
-      x: sub.x + Math.cos(a) * dist,
-      y: sub.y + Math.sin(a) * dist,
+      x: sInst.x + Math.cos(a) * dist,
+      y: sInst.y + Math.sin(a) * dist,
       placedAt: now,
       immuneUntil: now + 3,
       lifetime: 60,
@@ -2637,7 +2686,7 @@ function gameLoop(time) {
   }
 
   // ── Update AI subs ──
-  for (const ai of aiSubs) ai.update(dt, sub.x, sub.y);
+  for (const ai of aiSubs) ai.update(dt);
 
   // ── Unified hit detection: all missiles vs all subs (except owner) ──
   for (let i = missiles.length - 1; i >= 0; i--) {
@@ -2689,9 +2738,11 @@ function gameLoop(time) {
   // ── Stealth timer ──
   if (player.isStealth) {
     player.stealthTimer -= dt;
-    if (player.stealthTimer <= 0) {
-      deactivateStealth();
-    }
+    if (player.stealthTimer <= 0) deactivateStealth(player, sub);
+  }
+  if (dualMode && player2.isStealth) {
+    player2.stealthTimer -= dt;
+    if (player2.stealthTimer <= 0) deactivateStealth(player2, sub2);
   }
 
   // ── Update lasers ──
@@ -2810,16 +2861,10 @@ function gameLoop(time) {
   if (dualMode) { updateCamera2(sub2.x, sub2.y, dt); }
 
   // Skill activation (P1: X, P2: -)
-  if (p1Skill && player.activeSkill && !keys._xWasDown) { activateSkill(); }
+  if (p1Skill && player.activeSkill && !keys._xWasDown) { activateSkill(player, sub); }
   keys._xWasDown = p1Skill || false;
   if (dualMode && p2Input.skill && player2.activeSkill && !p2Input._skillWasDown) {
-    const _ps=player.passiveSkill,_as=player.activeSkill,_st=player.isStealth,_stt=player.stealthTimer,_sas=sub.stealthActive;
-    player.passiveSkill=player2.passiveSkill; player.activeSkill=player2.activeSkill; player.isStealth=player2.isStealth; player.stealthTimer=player2.stealthTimer;
-    sub.stealthActive=player2.isStealth; sub._origMaxSpeed=280; sub._origAccel=180;
-    activateSkill();
-    player2.passiveSkill=player.passiveSkill; player2.activeSkill=player.activeSkill; player2.isStealth=player.isStealth; player2.stealthTimer=player.stealthTimer;
-    sub2.stealthActive=player2.isStealth;
-    player.passiveSkill=_ps; player.activeSkill=_as; player.isStealth=_st; player.stealthTimer=_stt; sub.stealthActive=_sas;
+    activateSkill(player2, sub2);
   }
   p2Input._skillWasDown = p2Input.skill || false;
 
