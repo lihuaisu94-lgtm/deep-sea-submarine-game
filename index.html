@@ -98,6 +98,63 @@
   #gameover-overlay .menu-btn { margin:6px 0; }
   /* ── HUD time ── */
   #time-val { color:#f6d365; }
+  /* ── Tutorial Panel ── */
+  #tutorial-panel {
+    position: absolute; bottom: 16px; right: 16px;
+    width: 300px; max-height: 70vh;
+    background: rgba(10,22,40,0.94);
+    border: 1px solid rgba(79,172,254,0.35);
+    border-radius: 10px;
+    padding: 18px 16px 14px;
+    font-family: 'Courier New', monospace;
+    color: #c3e0f0; font-size: 11px;
+    line-height: 1.6; letter-spacing: 0.5px;
+    overflow-y: auto;
+    pointer-events: auto;
+    z-index: 10;
+  }
+  #tutorial-panel::-webkit-scrollbar { width: 4px; }
+  #tutorial-panel::-webkit-scrollbar-thumb { background: rgba(79,172,254,0.3); border-radius: 2px; }
+  #tutorial-panel h3 {
+    font-size: 13px; color: #4facfe; letter-spacing: 3px;
+    margin: 0 0 10px; text-align: center;
+    border-bottom: 1px solid rgba(79,172,254,0.25);
+    padding-bottom: 8px;
+  }
+  #tutorial-panel h4 {
+    font-size: 11px; color: #f6d365; letter-spacing: 2px;
+    margin: 10px 0 4px;
+  }
+  #tutorial-panel .tut-row {
+    display: flex; justify-content: space-between;
+    padding: 1px 0;
+  }
+  #tutorial-panel .tut-key {
+    display: inline-block;
+    background: rgba(79,172,254,0.18);
+    border: 1px solid rgba(79,172,254,0.4);
+    border-radius: 3px; padding: 0 5px;
+    font-size: 10px; color: #e0f0ff;
+    min-width: 18px; text-align: center;
+    margin-right: 2px;
+  }
+  #tutorial-panel .tut-key.gold {
+    background: rgba(246,211,101,0.15);
+    border-color: rgba(246,211,101,0.4);
+    color: #f6d365;
+  }
+  #tutorial-panel .tut-desc { color: #8ab4cc; }
+  #tutorial-panel .tut-tag {
+    display: inline-block;
+    font-size: 9px; padding: 0 4px; border-radius: 2px;
+    margin-right: 2px;
+  }
+  #tutorial-panel .tut-tag.blue {
+    background: rgba(79,172,254,0.2); color: #4facfe;
+  }
+  #tutorial-panel .tut-tag.gold {
+    background: rgba(246,211,101,0.2); color: #f6d365;
+  }
 </style>
 </head>
 <body>
@@ -169,6 +226,32 @@
     <input type="text" id="room-id-input" placeholder="输入房间号" maxlength="12" style="margin-top:6px;">
     <button class="menu-btn" id="btn-join">加入房间</button>
     <div id="room-info" style="display:none; color:#4facfe; font-size:13px; letter-spacing:2px; margin-top:10px;"></div>
+  </div>
+  <!-- ── Tutorial Panel ── -->
+  <div id="tutorial-panel">
+    <h3>操作教程</h3>
+    <h4>单人模式</h4>
+    <div class="tut-row"><span><span class="tut-key">W</span><span class="tut-key">A</span><span class="tut-key">S</span><span class="tut-key">D</span></span><span class="tut-desc">移动潜艇</span></div>
+    <div class="tut-row"><span><span class="tut-key">Space</span></span><span class="tut-desc">普攻 / 发射导弹</span></div>
+    <div class="tut-row"><span><span class="tut-key gold">X</span></span><span class="tut-desc">释放主动技能</span></div>
+    <h4>双人模式</h4>
+    <div style="color:#4facfe; margin-bottom:2px;">P1 蓝方</div>
+    <div class="tut-row"><span><span class="tut-key">W</span><span class="tut-key">A</span><span class="tut-key">S</span><span class="tut-key">D</span></span><span class="tut-desc">移动潜艇</span></div>
+    <div class="tut-row"><span><span class="tut-key">Space</span></span><span class="tut-desc">普攻 / 发射导弹</span></div>
+    <div class="tut-row"><span><span class="tut-key gold">X</span></span><span class="tut-desc">释放主动技能</span></div>
+    <div style="color:#e74c3c; margin-bottom:2px; margin-top:6px;">P2 红方</div>
+    <div class="tut-row"><span><span class="tut-key">&uarr;</span><span class="tut-key">&larr;</span><span class="tut-key">&darr;</span><span class="tut-key">&rarr;</span></span><span class="tut-desc">移动潜艇</span></div>
+    <div class="tut-row"><span><span class="tut-key">+</span></span><span class="tut-desc">普攻 / 发射导弹</span></div>
+    <div class="tut-row"><span><span class="tut-key gold">-</span></span><span class="tut-desc">释放主动技能</span></div>
+    <h4>被动技能 <span class="tut-tag blue">蓝</span></h4>
+    <div class="tut-row"><span><span class="tut-tag blue">BIG</span></span><span class="tut-desc">导弹变大，伤害提升</span></div>
+    <div class="tut-row"><span><span class="tut-tag blue">FAST</span></span><span class="tut-desc">导弹加速，射程更远</span></div>
+    <div class="tut-row"><span><span class="tut-tag blue">MULTI</span></span><span class="tut-desc">三弹齐射，扇形覆盖</span></div>
+    <h4>主动技能 <span class="tut-tag gold">金</span></h4>
+    <div class="tut-row"><span><span class="tut-tag gold">STLTH</span></span><span class="tut-desc">隐身 8 秒，减速 30%</span></div>
+    <div class="tut-row"><span><span class="tut-tag gold">LASER</span></span><span class="tut-desc">发射高能激光，瞬间伤害</span></div>
+    <div class="tut-row"><span><span class="tut-tag gold">DECOY</span></span><span class="tut-desc">释放 2 个诱饵，迷惑敌人</span></div>
+    <div class="tut-row"><span><span class="tut-tag gold">MINE</span></span><span class="tut-desc">布设 3 枚水雷，区域封锁</span></div>
   </div>
 </div>
 

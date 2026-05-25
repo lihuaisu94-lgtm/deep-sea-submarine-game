@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node -e ' *)",
+      "Bash(\"/c/Program Files/GitHub CLI/gh\" api repos/lihuaisu94-lgtm/deep-sea-submarine-game/pages -X POST -f \"source[branch]=master\" -f \"source[path]=/\")",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" \"https://lihuaisu94-lgtm.github.io/deep-sea-submarine-game/\")"
+    ]
+  }
+}
