@@ -1742,26 +1742,37 @@ class AISub {
     if (this.fireCD > 0) return;
     let dA = headingToTarget - this.heading;
     while (dA > Math.PI) dA -= Math.PI*2; while (dA < -Math.PI) dA += Math.PI*2;
-    // Tighter angle: 10° (was 15°), or 20° when rushing
-    const angleTol = shortCD ? 20 * Math.PI/180 : 10 * Math.PI/180;
-    if (Math.abs(dA) < angleTol) {
-      this.fireCD = shortCD ? 1.0 : 1.5;
-      const bx = this.x + Math.cos(this.heading)*32;
-      const by = this.y + Math.sin(this.heading)*32;
+    // Allow wider angle when close — AI should spray
+    const tol = shortCD ? 30 : 22;
+    if (Math.abs(dA) > tol * Math.PI/180) return;
+
+    this.fireCD = shortCD ? 0.8 : 1.2;
+    const bx = this.x + Math.cos(this.heading)*32;
+    const by = this.y + Math.sin(this.heading)*32;
+
+    // Check for MULTI_HEAD BEFORE consuming (fix double-consumption bug)
+    const hasMulti = this.passiveSkill && this.passiveSkill.typeId === 'MULTI_HEAD';
+    const hasPassive = this.passiveSkill && !hasMulti;
+
+    if (hasMulti) {
+      const m1 = new Missile(bx, by, this.heading);
+      m1.isEnemy = true; m1.owner = this;
+      const m2 = new Missile(bx, by, this.heading - 12*Math.PI/180);
+      m2.isEnemy = true; m2.owner = this;
+      const m3 = new Missile(bx, by, this.heading + 12*Math.PI/180);
+      m3.isEnemy = true; m3.owner = this;
+      missiles.push(m1, m2, m3);
+      this.passiveSkill.charges--;
+      if (this.passiveSkill.charges <= 0) this.passiveSkill = null;
+    } else {
       const m = new Missile(bx, by, this.heading);
       m.isEnemy = true; m.owner = this;
-      if (this.passiveSkill) applyPassiveEffect(m, this.passiveSkill);
-      // Consume passive
-      if (this.passiveSkill) { this.passiveSkill.charges--; if (this.passiveSkill.charges <= 0) this.passiveSkill = null; }
-      // MULTI
-      if (this.passiveSkill && this.passiveSkill.typeId === 'MULTI_HEAD') {
-        missiles.push(m);
-        missiles.push(new Missile(bx, by, this.heading - 12*Math.PI/180));
-        missiles.push(new Missile(bx, by, this.heading + 12*Math.PI/180));
-        this.passiveSkill.charges--; if (this.passiveSkill.charges <= 0) this.passiveSkill = null;
-      } else {
-        missiles.push(m);
+      if (hasPassive) {
+        applyPassiveEffect(m, this.passiveSkill);
+        this.passiveSkill.charges--;
+        if (this.passiveSkill.charges <= 0) this.passiveSkill = null;
       }
+      missiles.push(m);
     }
   }
 
@@ -1890,47 +1901,49 @@ class AISub {
       const ddx = wrappedDistX(this.x, huntTarget.x), ddy = this.y - huntTarget.y;
       const dist = Math.sqrt(ddx*ddx + ddy*ddy);
 
-      // Predict player movement (distance-based lead)
+      // Lead prediction based on distance
       const tRef = hasLiveTarget ? target.ref : null;
       let angVel = 0;
       if (tRef && tRef.angularVel !== undefined) angVel = Math.abs(tRef.angularVel);
       const playerTurning = angVel > 0.8;
-      const lead = playerTurning ? 0 : Math.min(0.5, dist * 0.0005); // up to 0.5s lead
+      const lead = playerTurning ? 0 : Math.min(0.6, dist * 0.0006);
 
-      if (dist > 300) {
-        // ── CHASE: full speed pursuit ──
+      // Angle to target (for fire checks)
+      const aToT = Math.atan2(ddy, ddx);
+      let dA = aToT - this.heading;
+      while (dA > Math.PI) dA -= Math.PI*2; while (dA < -Math.PI) dA += Math.PI*2;
+      const aimError = Math.abs(dA);
+
+      if (dist > 350) {
+        // ── LONG CHASE: full speed pursuit ──
         this.state = 'chase';
         const predX = huntTarget.x + (huntTarget.vx||0) * lead;
         const predY = huntTarget.y + (huntTarget.vy||0) * lead;
         const pdx = wrappedDistX(this.x, predX), pdy = this.y - predY;
-        const pDist = Math.sqrt(pdx*pdx + pdy*pdy);
-        const aToT = Math.atan2(pdy, pdx);
-        this._steerTo(predX, predY, 3.0, dt); // faster steering
-        const rushMul = 1 + Math.max(0, this.rushBonus * 0.4); // up to +60% speed during rush
+        this._steerTo(predX, predY, 3.0, dt);
+        const rushMul = 1 + Math.max(0, this.rushBonus * 0.4);
         this._move(dt, 220 * rushMul, 180 * rushMul);
-        // Fire at range if aimed
-        if (pDist < 600 && this.fireCD <= 0 && Math.abs(aToT - this.heading) < 0.3) {
-          this._tryFire(target, aToT, true);
-          this._dodgeTimer = 0.3;
-          this._dodgeDir = Math.random() < 0.5 ? -1 : 1;
+        // Fire when roughly aimed at predicted position
+        const pDist = Math.sqrt(pdx*pdx + pdy*pdy);
+        const paToT = Math.atan2(pdy, pdx);
+        if (pDist < 700 && this.fireCD <= 0 && Math.abs(paToT - this.heading) < 0.45) {
+          this._tryFire(target, paToT, true);
         }
-      } else if (dist > 120) {
-        // ── MID-RANGE: close in aggressively ──
+      } else if (dist > 130) {
+        // ── MID-RANGE: charge and fire ──
         this.state = 'chase';
         const predX = huntTarget.x + (huntTarget.vx||0) * lead;
         const predY = huntTarget.y + (huntTarget.vy||0) * lead;
         const pdx = wrappedDistX(this.x, predX), pdy = this.y - predY;
-        const aToT = Math.atan2(pdy, pdx);
-        this._steerTo(predX, predY, 3.2, dt);
-        this._move(dt, 200, 170);
-        // Fire aggressively
-        if (this.fireCD <= 0 && Math.abs(aToT - this.heading) < 0.25) {
-          this._tryFire(target, aToT, false);
-          this._dodgeTimer = 0.4;
-          this._dodgeDir = Math.random() < 0.5 ? -1 : 1;
+        this._steerTo(predX, predY, 3.5, dt);
+        this._move(dt, 200, 180);
+        // Fire with moderate angle tolerance
+        const paToT = Math.atan2(pdy, pdx);
+        if (this.fireCD <= 0 && Math.abs(paToT - this.heading) < 0.40) {
+          this._tryFire(target, paToT, false);
         }
       } else {
-        // ── CLOSE RANGE: orbit and spam fire ──
+        // ── CLOSE RANGE: face-target strafe + spam fire ──
         this.state = 'engage';
         let losBlocked = false;
         if (hasLiveTarget) {
@@ -1945,29 +1958,24 @@ class AISub {
           this._steerTo(huntTarget.x, huntTarget.y, 2.5, dt);
           this._move(dt, 160, 120);
         } else {
-          // Orbit around target — circle at speed
-          const aToT = Math.atan2(ddy, ddx);
-          // Choose orbit direction based on dodge preference
-          const orbitDir = this._dodgeDir || 1;
-          const orbitA = aToT + (Math.PI / 2.2) * orbitDir; // ~82° offset = tight orbit
-          this.targetHeading = orbitA;
-          let dH = this.targetHeading - this.heading;
-          while (dH > Math.PI) dH -= Math.PI*2; while (dH < -Math.PI) dH += Math.PI*2;
-          this.heading += dH * 4.0 * dt; // very fast turning
-          this._move(dt, 170, 150);
-
-          // Fire rapidly at close range
-          if (this.fireCD <= 0 && Math.abs(aToT - this.heading) < 0.35) {
-            this._tryFire(target, aToT, true); // short CD fire
-            this._dodgeTimer = 0.3;
-            this._dodgeDir = -orbitDir; // switch orbit direction
+          // Face toward player while strafing sideways — NOT pure orbit
+          // Alternate between facing player (to fire) and strafing (to evade)
+          this._move(dt, 160, 140);
+          // Fire whenever roughly aimed at player
+          if (this.fireCD <= 0 && aimError < 0.50) {
+            this._tryFire(target, aToT, true);
+            // Strafe after each shot
+            this._dodgeDir = (Math.random() < 0.5 ? -1 : 1);
+            this._dodgeTimer = 0.5;
           }
+          // Always steer toward player (not orbit!) to keep guns on target
+          this._steerTo(huntTarget.x, huntTarget.y, 3.5, dt);
         }
       }
 
-      // Dodge during combat
+      // Dodge maneuver — brief lateral jink
       if (this._dodgeTimer > 0) {
-        this.heading += this._dodgeDir * 3.5 * dt;
+        this.heading += this._dodgeDir * 4.0 * dt;
       }
       this._autoUseActive(hasLiveTarget ? target : null);
       return;
