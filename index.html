@@ -1645,6 +1645,11 @@ class AISub {
     // combat
     this._dodgeTimer = 0;
     this._dodgeDir = 1;
+    // ── Aggression system ──
+    this.alertTimer = 0;        // seconds remaining in aggressive pursuit
+    this.lastKnownX = 0;        // last known player position
+    this.lastKnownY = 0;
+    this.rushBonus = 0;         // speed burst on first contact
   }
 
   _findTarget() {
@@ -1660,6 +1665,13 @@ class AISub {
       const d2dx = wrappedDistX(this.x, sub2.x), d2dy = this.y - sub2.y;
       const d2d = Math.sqrt(d2dx*d2dx + d2dy*d2dy);
       if (d2d < bestD) { bestD = d2d; best = { x:sub2.x, y:sub2.y, vx:Math.cos(sub2.heading)*sub2.speed, vy:Math.sin(sub2.heading)*sub2.speed, type:'player', ref:sub2, id:'P2' }; }
+    }
+    // Update alert & last-known-position
+    if (best) {
+      this.alertTimer = 20;  // aggressive pursuit for 20s
+      this.lastKnownX = best.x;
+      this.lastKnownY = best.y;
+      if (this.rushBonus <= 0) this.rushBonus = 1.5; // speed burst on first sight
     }
     return best;
   }
@@ -1726,13 +1738,14 @@ class AISub {
     this.x = wrapX(this.x);
   }
 
-  _tryFire(target, headingToTarget) {
+  _tryFire(target, headingToTarget, shortCD) {
     if (this.fireCD > 0) return;
-    // Angle check: < 15°
     let dA = headingToTarget - this.heading;
     while (dA > Math.PI) dA -= Math.PI*2; while (dA < -Math.PI) dA += Math.PI*2;
-    if (Math.abs(dA) < 15 * Math.PI/180) {
-      this.fireCD = 2;
+    // Tighter angle: 10° (was 15°), or 20° when rushing
+    const angleTol = shortCD ? 20 * Math.PI/180 : 10 * Math.PI/180;
+    if (Math.abs(dA) < angleTol) {
+      this.fireCD = shortCD ? 1.0 : 1.5;
       const bx = this.x + Math.cos(this.heading)*32;
       const by = this.y + Math.sin(this.heading)*32;
       const m = new Missile(bx, by, this.heading);
@@ -1763,17 +1776,17 @@ class AISub {
       const aToT = Math.atan2(ddy, ddx);
       let dA = aToT - this.heading;
       while (dA > Math.PI) dA -= Math.PI*2; while (dA < -Math.PI) dA += Math.PI*2;
-      if (d < 1000 && Math.abs(dA) < 0.5) use = true;
+      if (d < 1200 && Math.abs(dA) < 0.5) use = true; // extended laser range
     }
     if (sid === 'DECOY') {
       for (const m of missiles) {
         if (!m.isEnemy && m.alive) {
           const ddx = wrappedDistX(this.x, m.x), ddy = this.y - m.y;
-          if (Math.sqrt(ddx*ddx + ddy*ddy) < 200) { use = true; break; }
+          if (Math.sqrt(ddx*ddx + ddy*ddy) < 300) { use = true; break; } // wider detection
         }
       }
     }
-    if (sid === 'MINE' && this.state === 'patrol' && Math.random() < 0.01) use = true;
+    if (sid === 'MINE' && this.alertTimer > 0 && Math.random() < 0.02) use = true; // mine in combat too
     if (use) { this._activateSkill(sid); this.activeSkill = null; }
   }
 
@@ -1801,11 +1814,16 @@ class AISub {
     if (this.showHP > 0) this.showHP -= dt;
     this.fireCD -= dt;
     if (this._dodgeTimer > 0) this._dodgeTimer -= dt;
+    if (this.alertTimer > 0) this.alertTimer -= dt;
+    if (this.rushBonus > 0) this.rushBonus -= dt;
 
     // ── Target perception ──
     const target = this._findTarget();
     const nearSkill = this._findNearestSkill();
-    this.hasTarget = !!target;
+    const hasLiveTarget = !!target;
+    // Use alert-persistence: if alertTimer active, hunt last known position
+    const huntTarget = target || (this.alertTimer > 0 ? { x: this.lastKnownX, y: this.lastKnownY, vx:0, vy:0, type:'memory', ref:null, id:'?' } : null);
+    this.hasTarget = hasLiveTarget || this.alertTimer > 0;
     const hpRatio = this.hp / this.maxHp;
 
     // ── Stuck detection ──
@@ -1820,9 +1838,7 @@ class AISub {
 
     // ── State machine ──
     if (isStuck) {
-      // State C: Unstuck
       this.state = 'unstuck';
-      // Reverse
       this.speed -= 60 * dt;
       this.speed = Math.max(-80, this.speed);
       const rvx = Math.cos(this.heading) * this.speed * dt;
@@ -1830,7 +1846,6 @@ class AISub {
       let nx = this.x + rvx, ny = this.y + rvy;
       if (!checkLandCollision(nx, ny, this.colR)) { this.x = nx; this.y = ny; }
       this.x = wrapX(this.x);
-      // Find best escape angle
       let bestA = this.heading, bestOpen = 0;
       for (let i = 0; i < 12; i++) {
         const a = (i / 12) * Math.PI * 2;
@@ -1849,7 +1864,6 @@ class AISub {
       this.heading += dH * 2.5 * dt;
       this.speed += 120 * dt;
       this.speed = Math.max(30, Math.min(180, this.speed));
-      // Emergency teleport after 5s stuck
       if (this.stuckTimer > 5) {
         const safe = findOpenWaterPos(120, 50);
         for (let f = 0; f < 12; f++) {
@@ -1862,103 +1876,108 @@ class AISub {
       return;
     }
 
-    // ── Low HP flee ──
-    if (hpRatio < 0.3 && target) {
+    // ── Flee only at critical HP (20%) ──
+    if (hpRatio < 0.2 && hasLiveTarget) {
       this.state = 'flee';
-      this._steerTo(target.x, target.y, -2.0, dt);
-      this._move(dt, 220, 200);
+      this._steerTo(target.x, target.y, -2.5, dt);
+      this._move(dt, 240, 220);
       this._autoUseActive(target);
       return;
     }
 
-    // ── Combat states with target ──
-    if (target) {
-      const ddx = wrappedDistX(this.x, target.x), ddy = this.y - target.y;
+    // ── COMBAT: relentless pursuit when target or alert active ──
+    if (huntTarget) {
+      const ddx = wrappedDistX(this.x, huntTarget.x), ddy = this.y - huntTarget.y;
       const dist = Math.sqrt(ddx*ddx + ddy*ddy);
-      // Predict player angular velocity for aiming strategy
-      const tRef = target.ref;
+
+      // Predict player movement (distance-based lead)
+      const tRef = hasLiveTarget ? target.ref : null;
       let angVel = 0;
       if (tRef && tRef.angularVel !== undefined) angVel = Math.abs(tRef.angularVel);
       const playerTurning = angVel > 0.8;
+      const lead = playerTurning ? 0 : Math.min(0.5, dist * 0.0005); // up to 0.5s lead
 
-      if (dist > 250) {
-        // ── State A: Chase ──
+      if (dist > 300) {
+        // ── CHASE: full speed pursuit ──
         this.state = 'chase';
-        // Predict target position (0.3s lead)
-        const lead = playerTurning ? 0 : 0.3;
-        const predX = target.x + (target.vx||0) * lead;
-        const predY = target.y + (target.vy||0) * lead;
+        const predX = huntTarget.x + (huntTarget.vx||0) * lead;
+        const predY = huntTarget.y + (huntTarget.vy||0) * lead;
         const pdx = wrappedDistX(this.x, predX), pdy = this.y - predY;
         const pDist = Math.sqrt(pdx*pdx + pdy*pdy);
         const aToT = Math.atan2(pdy, pdx);
-        this._steerTo(predX, predY, 2.2, dt);
-        this._move(dt, 180, 140);
-        // Fire at long range if roughly aimed
-        if (pDist < 500 && this.fireCD <= 0 && Math.abs(aToT - this.heading) < 0.3) {
-          this._tryFire(target, aToT);
-          this._dodgeTimer = 0.5;
+        this._steerTo(predX, predY, 3.0, dt); // faster steering
+        const rushMul = 1 + Math.max(0, this.rushBonus * 0.4); // up to +60% speed during rush
+        this._move(dt, 220 * rushMul, 180 * rushMul);
+        // Fire at range if aimed
+        if (pDist < 600 && this.fireCD <= 0 && Math.abs(aToT - this.heading) < 0.3) {
+          this._tryFire(target, aToT, true);
+          this._dodgeTimer = 0.3;
+          this._dodgeDir = Math.random() < 0.5 ? -1 : 1;
+        }
+      } else if (dist > 120) {
+        // ── MID-RANGE: close in aggressively ──
+        this.state = 'chase';
+        const predX = huntTarget.x + (huntTarget.vx||0) * lead;
+        const predY = huntTarget.y + (huntTarget.vy||0) * lead;
+        const pdx = wrappedDistX(this.x, predX), pdy = this.y - predY;
+        const aToT = Math.atan2(pdy, pdx);
+        this._steerTo(predX, predY, 3.2, dt);
+        this._move(dt, 200, 170);
+        // Fire aggressively
+        if (this.fireCD <= 0 && Math.abs(aToT - this.heading) < 0.25) {
+          this._tryFire(target, aToT, false);
+          this._dodgeTimer = 0.4;
           this._dodgeDir = Math.random() < 0.5 ? -1 : 1;
         }
       } else {
-        // ── State B: Engage (dist <= 250) ──
+        // ── CLOSE RANGE: orbit and spam fire ──
         this.state = 'engage';
-        // Check line-of-sight (no land between)
         let losBlocked = false;
-        for (let s = 0.1; s <= 1; s += 0.1) {
-          const sx = this.x + ddx * s;
-          const sy = this.y + ddy * s;
-          if (isPointOnLand(sx, sy)) { losBlocked = true; break; }
+        if (hasLiveTarget) {
+          for (let s = 0.1; s <= 1; s += 0.1) {
+            const sx = this.x + ddx * s;
+            const sy = this.y + ddy * s;
+            if (isPointOnLand(sx, sy)) { losBlocked = true; break; }
+          }
         }
-        // Aim at player position (no prediction if turning; 0.3s lead if straight)
-        const lead = playerTurning ? 0 : 0.3;
-        const aimX = target.x + (target.vx||0) * lead;
-        const aimY = target.y + (target.vy||0) * lead;
-        const adx = wrappedDistX(this.x, aimX), ady = this.y - aimY;
-        const aToT = Math.atan2(ady, adx);
 
-        if (losBlocked) {
-          // Can't see target, reposition
-          this._steerTo(target.x, target.y, 2.0, dt);
-          this._move(dt, 140, 100);
+        if (losBlocked || !hasLiveTarget) {
+          this._steerTo(huntTarget.x, huntTarget.y, 2.5, dt);
+          this._move(dt, 160, 120);
         } else {
-          // Steer toward aim point
-          this._steerTo(aimX, aimY, 2.5, dt);
+          // Orbit around target — circle at speed
+          const aToT = Math.atan2(ddy, ddx);
+          // Choose orbit direction based on dodge preference
+          const orbitDir = this._dodgeDir || 1;
+          const orbitA = aToT + (Math.PI / 2.2) * orbitDir; // ~82° offset = tight orbit
+          this.targetHeading = orbitA;
+          let dH = this.targetHeading - this.heading;
+          while (dH > Math.PI) dH -= Math.PI*2; while (dH < -Math.PI) dH += Math.PI*2;
+          this.heading += dH * 4.0 * dt; // very fast turning
+          this._move(dt, 170, 150);
 
-          if (dist < 120) {
-            // Too close, strafe
-            const strafeA = this.heading + (Math.PI / 2) * (this._dodgeDir || 1);
-            this.targetHeading = strafeA;
-            let dH = this.targetHeading - this.heading;
-            while (dH > Math.PI) dH -= Math.PI*2; while (dH < -Math.PI) dH += Math.PI*2;
-            this.heading += dH * 2.5 * dt;
-            this._move(dt, 100, 80);
-          } else {
-            this._move(dt, 90, 50);
-          }
-
-          // Fire when aimed (±15° ≈ 0.26 rad)
-          if (this.fireCD <= 0 && Math.abs(aToT - this.heading) < 0.26) {
-            this._tryFire(target, aToT);
-            this.fireCD = 2.5;
-            // Dodge after firing
-            this._dodgeTimer = 0.5;
-            this._dodgeDir = Math.random() < 0.5 ? -1 : 1;
+          // Fire rapidly at close range
+          if (this.fireCD <= 0 && Math.abs(aToT - this.heading) < 0.35) {
+            this._tryFire(target, aToT, true); // short CD fire
+            this._dodgeTimer = 0.3;
+            this._dodgeDir = -orbitDir; // switch orbit direction
           }
         }
       }
-      // Dodge maneuver
+
+      // Dodge during combat
       if (this._dodgeTimer > 0) {
-        this.heading += this._dodgeDir * 2.5 * dt;
+        this.heading += this._dodgeDir * 3.5 * dt;
       }
-      this._autoUseActive(target);
+      this._autoUseActive(hasLiveTarget ? target : null);
       return;
     }
 
-    // ── No target: collect skill or patrol ──
-    if (nearSkill && hpRatio >= 0.5) {
+    // ── No target, not alert: collect skill or patrol ──
+    if (nearSkill) {
       this.state = 'collect';
-      this._steerTo(nearSkill.x, nearSkill.y, 1.6, dt);
-      this._move(dt, 140, 90);
+      this._steerTo(nearSkill.x, nearSkill.y, 1.8, dt);
+      this._move(dt, 150, 100);
     } else {
       this.state = 'patrol';
       this.aiTimer = (this.aiTimer||0) - dt;
@@ -1980,6 +1999,8 @@ class AISub {
     this.wreckX = this.x; this.wreckY = this.y; this.wreckTimer = 5;
     this.respawnTimer = 10;
     this.showHP = 0;
+    this.alertTimer = 0;
+    this.rushBonus = 0;
   }
 
   _respawnRandom() {
@@ -1992,6 +2013,10 @@ class AISub {
     this.passiveSkill = null; this.activeSkill = null; this.isStealth = false;
     this.stuckTimer = 0; this.escapeBoost = 0;
     this._dodgeTimer = 0; this._dodgeDir = 1;
+    this.alertTimer = 0;
+    this.rushBonus = 0;
+    this.lastKnownX = pos.x;
+    this.lastKnownY = pos.y;
   }
 
   draw(ctx) {
