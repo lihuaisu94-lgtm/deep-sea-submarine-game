@@ -439,7 +439,7 @@ function handleServerMsg(msg) {
       for (const sm of (msg.mines||[])) { mines.push({ x:sm.x, y:sm.y, placedAt:sm.placedAt, immuneUntil:sm.placedAt+3, lifetime:60, radius:8, triggerR:60, alive:true, haloA:0 }); }
       // Sync lasers
       lasers.length = 0;
-      for (const sl of (msg.lasers||[])) { lasers.push({ x:sl.x, y:sl.y, angle:sl.angle, length:sl.length, life:sl.life, maxLife:sl.maxLife }); }
+      for (const sl of (msg.lasers||[])) { lasers.push({ x:sl.x, y:sl.y, angle:sl.angle, length:2000, life:sl.life, maxLife:0.55, owner:'remote' }); }
       // Time
       if (msg.timeLeft !== undefined) lastTimeLeft = msg.timeLeft;
       break;
@@ -455,7 +455,7 @@ function handleServerMsg(msg) {
     case 'skill_event':
       if (msg.playerColor !== localColorIdx) {
         if (msg.skillType === 'LASER') {
-          lasers.push({ x:msg.x, y:msg.y, angle:msg.heading, length:1500, life:0.4, maxLife:0.4 });
+          lasers.push({ x:msg.x, y:msg.y, angle:msg.heading, length:2000, life:0.55, maxLife:0.55, owner:'remote' });
         }
       }
       break;
@@ -1804,8 +1804,17 @@ class AISub {
   _activateSkill(sid) {
     if (sid === 'STEALTH') { this.isStealth = true; this.stealthTimer = 8; }
     if (sid === 'LASER') {
+      const bx = this.x+Math.cos(this.heading)*38;
+      const by = this.y+Math.sin(this.heading)*38;
       lasers.length = 0;
-      lasers.push({ x: this.x+Math.cos(this.heading)*32, y: this.y+Math.sin(this.heading)*32, angle: this.heading, length: 1500, life: 0.4, maxLife: 0.4 });
+      lasers.push({ x: bx, y: by, angle: this.heading, length: 2000, life: 0.55, maxLife: 0.55, owner: this });
+      // Muzzle particles
+      for (let i = 0; i < 16; i++) {
+        const spread = (Math.random()-0.5)*0.8;
+        const a = this.heading+spread;
+        const spd = 100+Math.random()*250;
+        particles.push(new Particle(bx,by, Math.cos(a)*spd, Math.sin(a)*spd, 0.12+Math.random()*0.08, Math.random()<0.5?'#ff1a1a':'#ff5555', 3+Math.random()*4));
+      }
     }
     if (sid === 'DECOY') {
       decoys.push(new Decoy(this.x+(Math.random()-0.5)*40, this.y+(Math.random()-0.5)*40, this.heading+(Math.random()-0.5)*0.7, this.speed));
@@ -2157,7 +2166,7 @@ function activateSkill(pState, sInst) {
   switch (skill.typeId) {
     case 'STEALTH': activateStealth(pState, sInst); break;
     case 'DECOY':   activateDecoy(sInst);           break;
-    case 'LASER':   spawnLaser(sInst);              break;
+    case 'LASER':   spawnLaser(sInst, sInst === sub ? 'p1' : 'p2'); break;
     case 'MINE':    spawnMines(sInst);              break;
   }
   pState.activeSkill = null;
@@ -2191,25 +2200,35 @@ function activateDecoy(sInst) {
   }
 }
 
-function spawnLaser(sInst) {
-  const bowX = sInst.x + Math.cos(sInst.heading) * 32;
-  const bowY = sInst.y + Math.sin(sInst.heading) * 32;
-  lasers.length = 0;
+function spawnLaser(sInst, owner) {
+  const bowX = sInst.x + Math.cos(sInst.heading) * 38;
+  const bowY = sInst.y + Math.sin(sInst.heading) * 38;
+  lasers.length = 0; // clear existing lasers (one at a time)
   lasers.push({
     x: bowX, y: bowY,
     angle: sInst.heading,
-    length: 1500,
-    life: 0.4, maxLife: 0.4,
+    length: 2000,
+    life: 0.55, maxLife: 0.55,
+    owner: owner, // 'p1' | 'p2' | AISub instance
   });
-  for (let i = 0; i < 12; i++) {
-    const spread = (Math.random() - 0.5) * 1.0;
+  // Muzzle flash particles
+  for (let i = 0; i < 20; i++) {
+    const spread = (Math.random() - 0.5) * 0.8;
     const a = sInst.heading + spread;
-    const spd = 80 + Math.random() * 160;
+    const spd = 120 + Math.random() * 300;
     particles.push(new Particle(bowX, bowY,
       Math.cos(a) * spd, Math.sin(a) * spd,
-      0.12 + Math.random() * 0.08,
+      0.15 + Math.random() * 0.1,
       Math.random() < 0.5 ? '#ff1a1a' : '#ff5555',
-      2 + Math.random() * 3));
+      3 + Math.random() * 5));
+  }
+  // Extra white spark particles
+  for (let i = 0; i < 8; i++) {
+    const a = sInst.heading + (Math.random() - 0.5) * 0.3;
+    particles.push(new Particle(bowX, bowY,
+      Math.cos(a) * 200, Math.sin(a) * 200,
+      0.08 + Math.random() * 0.04,
+      '#ffffff', 1.5 + Math.random() * 2));
   }
 }
 
@@ -2438,8 +2457,9 @@ function drawMinesWrapped(ctx) {
 function drawLasersWrapped(ctx) {
   for (const l of lasers) {
     const t = l.life / l.maxLife; // 1→0
-    const pulseW = 4 + Math.sin(t * Math.PI * 6) * 4; // 4↔12↔4
-    const alpha = t;
+    const alpha = Math.min(1, t * 1.5); // fade in fast, fade out slow
+    // Pulsing width: starts huge, settles
+    const pulseW = 8 + Math.sin(t * Math.PI * 8) * 6 + (1-t) * 18;
 
     for (const ox of [0, -WORLD_W, WORLD_W]) {
       const x1 = l.x + ox;
@@ -2449,24 +2469,59 @@ function drawLasersWrapped(ctx) {
 
       ctx.save();
       ctx.globalAlpha = alpha;
+
+      // Outer glow (wide, semi-transparent)
       ctx.shadowColor = '#ff1a1a';
-      ctx.shadowBlur = 30;
-      ctx.strokeStyle = '#ff1a1a';
-      ctx.lineWidth = pulseW;
+      ctx.shadowBlur = 60;
+      ctx.strokeStyle = 'rgba(255,30,30,0.3)';
+      ctx.lineWidth = pulseW + 16;
       ctx.lineCap = 'round';
       ctx.beginPath();
       ctx.moveTo(x1, y1);
       ctx.lineTo(x2, y2);
       ctx.stroke();
 
-      // Inner white core (brighter)
-      ctx.shadowBlur = 0;
-      ctx.strokeStyle = '#ffffff';
-      ctx.lineWidth = 2;
+      // Mid glow layer
+      ctx.shadowBlur = 40;
+      ctx.strokeStyle = 'rgba(255,80,30,0.6)';
+      ctx.lineWidth = pulseW + 6;
       ctx.beginPath();
       ctx.moveTo(x1, y1);
       ctx.lineTo(x2, y2);
       ctx.stroke();
+
+      // Main beam (red-orange)
+      ctx.shadowBlur = 25;
+      ctx.strokeStyle = '#ff2222';
+      ctx.lineWidth = pulseW;
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.stroke();
+
+      // Hot white core
+      ctx.shadowBlur = 15;
+      ctx.shadowColor = '#ffffff';
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = Math.max(1.5, pulseW * 0.25);
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.stroke();
+
+      // Origin flash (bright point at muzzle)
+      const flashR = 12 + Math.sin(t * 20) * 5;
+      const flashGrad = ctx.createRadialGradient(x1, y1, 0, x1, y1, flashR);
+      flashGrad.addColorStop(0, 'rgba(255,255,255,1)');
+      flashGrad.addColorStop(0.3, 'rgba(255,200,100,0.8)');
+      flashGrad.addColorStop(1, 'rgba(255,30,0,0)');
+      ctx.shadowBlur = 20;
+      ctx.shadowColor = '#ffffff';
+      ctx.fillStyle = flashGrad;
+      ctx.beginPath();
+      ctx.arc(x1, y1, flashR, 0, Math.PI*2);
+      ctx.fill();
+
       ctx.restore();
     }
   }
@@ -2863,8 +2918,86 @@ function gameLoop(time) {
 
   // ── Update lasers ──
   for (let i = lasers.length - 1; i >= 0; i--) {
-    lasers[i].life -= dt;
-    if (lasers[i].life <= 0) lasers.splice(i, 1);
+    const l = lasers[i];
+    l.life -= dt;
+    if (l.life <= 0) { lasers.splice(i, 1); continue; }
+
+    // ── Laser hit detection ── (only on first frame: life just started)
+    if (l.maxLife - l.life < dt * 1.1) {
+      const lx1 = l.x, ly1 = l.y;
+      const lx2 = lx1 + Math.cos(l.angle) * l.length;
+      const ly2 = ly1 + Math.sin(l.angle) * l.length;
+      const ldx = lx2 - lx1, ldy = ly2 - ly1;
+      const lLenSq = ldx*ldx + ldy*ldy;
+      const HIT_RADIUS = 24, LASER_DMG = 60;
+
+      // Build target list based on owner
+      const tgts = [];
+      if (l.owner === 'p1') {
+        // P1 laser: hits AI + P2
+        if (dualMode && sub2.state === 'alive') tgts.push(sub2);
+        for (const ai of aiSubs) { if (ai.alive && ai.rebuildTimer <= 0) tgts.push(ai); }
+      } else if (l.owner === 'p2') {
+        // P2 laser: hits AI + P1
+        if (sub.state === 'alive') tgts.push(sub);
+        for (const ai of aiSubs) { if (ai.alive && ai.rebuildTimer <= 0) tgts.push(ai); }
+      } else if (l.owner === 'remote') {
+        // Remote player laser: hits local player
+        if (sub.state === 'alive') tgts.push(sub);
+        if (dualMode && sub2.state === 'alive') tgts.push(sub2);
+      } else {
+        // AI laser: hits players
+        if (sub.state === 'alive') tgts.push(sub);
+        if (dualMode && sub2.state === 'alive') tgts.push(sub2);
+      }
+
+      for (const t of tgts) {
+        const tx = t.x, ty = t.y;
+        // Project target onto laser line (handle world wrap for X)
+        const ddx = wrappedDistX(lx1, tx), ddy = ty - ly1;
+        // Project (ddx, ddy) onto laser direction
+        const tParam = (ddx * ldx + ddy * ldy) / lLenSq;
+        const clampedT = Math.max(0, Math.min(1, tParam));
+        const closestX = lx1 + ldx * clampedT;
+        const closestY = ly1 + ldy * clampedT;
+        const cdx = wrappedDistX(closestX, tx);
+        const cdy = closestY - ty;
+        const dist = Math.sqrt(cdx*cdx + cdy*cdy);
+
+        if (dist < HIT_RADIUS) {
+          // Hit!
+          t.hp -= LASER_DMG;
+          if (t.showHP !== undefined) t.showHP = 3;
+          // Laser impact explosion
+          spawnExplosion(t.x, t.y, 1.8);
+          // Score screen shake particles along the laser
+          for (let j = 0; j < 10; j++) {
+            const along = 0.5 + (Math.random() - 0.5) * 0.4;
+            const px = lx1 + ldx * along;
+            const py = ly1 + ldy * along;
+            particles.push(new Particle(px, py,
+              (Math.random()-0.5)*60, (Math.random()-0.5)*60,
+              0.15, '#ff4444', 3 + Math.random()*3));
+          }
+          if (t.hp <= 0) {
+            spawnExplosion(t.x, t.y, 2.5);
+            if (t === sub || t === sub2) {
+              if (t.state === 'alive') {
+                t.state = 'dying'; t.alive = false;
+                t.deaths = (t.deaths||0) + 1;
+              }
+            } else if (t instanceof AISub) {
+              t.die();
+              const killerName = (l.owner === 'p1') ? 'P1' : (l.owner === 'p2') ? 'P2' : 'AI';
+              if (l.owner === 'p1') sub.kills = (sub.kills||0) + 1;
+              if (l.owner === 'p2') sub2.kills = (sub2.kills||0) + 1;
+            }
+          }
+          // Only hit first valid target per laser
+          break;
+        }
+      }
+    }
   }
 
   // ── Update mines ──
